@@ -1,0 +1,245 @@
+# cycle-inventory-output
+
+Governs the artifact shape for each inventory source produced by the cycle-review-inventory pipeline (`protocols/cycle-review-inventory.md`). One protocol covers all four output shapes — PRs, Asana, Notion, archive — because they share a common skeleton with source-specific per-item content.
+
+This is a format contract, not an executable protocol. Fetcher protocols reference this to ensure their output is consistent across sources.
+
+## Parameters
+
+- `source` — one of `prs`, `asana`, `notion`, `archive`. Determines per-item content shape.
+- `target_identity` — the resolved identity object from the pipeline.
+- `window_start`, `window_end` — ISO dates from the pipeline.
+- `feature_dir` — absolute path to the feature directory.
+
+## Output Path
+
+Write to `<feature_dir>/<source>-inventory.md`:
+
+- `prs` → `prs-inventory.md`
+- `asana` → `asana-inventory.md`
+- `notion` → `notion-inventory.md`
+- `archive` → `archive-inventory.md`
+
+Flat names. One canonical artifact per source. No iteration suffixes, no agent-numbered convention.
+
+## Common Skeleton
+
+Every inventory artifact starts with the same header block and ends with the same Summary block. The middle Items section varies by source.
+
+```markdown
+# <Source Display Name> Inventory — <display_name>
+
+**Window:** <window_start> to <window_end>
+**Target:** <github_login> / <display_name>
+**Fetched:** <ISO 8601 timestamp>
+**Source:** <system + endpoint, e.g., "GitHub /repos/{owner}/{repo}/pulls">
+**Count:** <N>
+
+## Items
+
+<source-specific per-item blocks, separated by `---` lines>
+
+## Summary
+
+<N> items. <M> sparse. <K> errors.
+```
+
+Source Display Names:
+- `prs` → `PRs Authored`
+- `asana` → `Asana Tasks`
+- `notion` → `Notion Pages`
+- `archive` → `Archive Feature Directories`
+
+## Per-Item Block — Required Common Fields
+
+Every item block, regardless of source, has:
+
+- **Header line:** `### <stable identifier> — <title>`. The identifier must be stable and resolvable in its source system (PR number, Asana GID, Notion page ID, archive directory path).
+- **Metadata block** of source-specific fields immediately below the header.
+- **Body content** — full text, untruncated unless very long (see Truncation below).
+- **Sparse marker** if applicable: `[SPARSE: <field> empty — <brief note>]` appended after the body. The marker identifies which field was empty so the Summary count can be reconstructed.
+- Trailing `---` separator before the next item.
+
+## Per-Item Block — PRs
+
+```markdown
+### #<number> in <owner>/<repo> — <title>
+
+**State:** <OPEN | MERGED | CLOSED>
+**Merged at:** <ISO 8601 or "—">
+**Closed at:** <ISO 8601 or "—">
+**Created at:** <ISO 8601>
+**URL:** <url>
+**Size:** +<additions> -<deletions> across <changedFiles> files
+**Files touched:** <comma-separated top-level dirs or top-N file paths>
+
+<PR body — full content, not just first paragraph>
+
+[SPARSE: body empty — PR has no description]
+```
+
+PR body is required content. Title-only enumeration is the prior-attempt failure mode this protocol mitigates.
+
+## Per-Item Block — Asana
+
+```markdown
+### <task_gid> — <task name>
+
+**Status:** <complete | incomplete>
+**Assignee:** <name or "unassigned">
+**Due:** <due_on or "—">
+**Completed at:** <ISO 8601 or "—">
+**Project(s):** <comma-separated project names>
+**URL:** <permalink_url>
+
+<full notes field — untruncated>
+
+[SPARSE: notes empty — task has no description]
+```
+
+Asana notes are required content. Name-only enumeration is the prior-attempt failure mode.
+
+## Per-Item Block — Notion
+
+```markdown
+### <page_id> — <page title>
+
+**Created at:** <ISO 8601>
+**Created by:** <user — confirms authored-by-target>
+**Last edited at:** <ISO 8601>
+**URL:** <url>
+**Type:** <page | database row | etc.>
+
+<full page content — markdown rendering of the page body>
+
+[SPARSE: content empty — page has no body]
+```
+
+Notion content is required. Pages also serve as writing-sample source for downstream style matching, so partial content is worse than no content for a page.
+
+## Per-Item Block — Archive
+
+```markdown
+### <directory slug> — <inferred description or directory name>
+
+**Path:** <absolute path to feature directory>
+**Most recent file mtime:** <ISO 8601>
+**File count:** <N>
+**Top-level files:** <comma-separated filenames>
+
+<first 1KB of the most relevant summary doc — handoff_*.md, findings.md, design.md, or similar>
+
+[SPARSE: no summary doc found — directory contents listed only]
+```
+
+The "most relevant" summary doc is determined by name preference order: `findings.md` > `design.md` > `handoff_*.md` (highest N) > `summary.md` > the largest top-level markdown file. If none exist, fall back to listing files only and mark sparse.
+
+## Truncation
+
+Default policy: do not truncate. Full content is required because downstream synthesis needs it.
+
+Exception: individual content blocks exceeding 50,000 characters may be truncated with `[truncated — <N> chars omitted]`. This caps pathological cases (autogenerated Notion docs, mega-PR descriptions) without losing typical content. Note any truncation in the artifact's Summary section.
+
+## Summary Block
+
+```
+<N> items. <M> sparse. <K> errors.
+```
+
+- **N** — total items in the Items section, including sparse and error entries.
+- **M** — count of items with a `[SPARSE: ...]` marker.
+- **K** — count of items whose fetch failed and were recorded with an error placeholder (see Error Items below).
+
+Truncations are noted on a separate line if any occurred:
+
+```
+<T> items truncated.
+```
+
+## Aggregates Block
+
+After the Summary block, every artifact emits a `## Aggregates` section with source-specific clustering. This surfaces where the work concentrated by facet, without requiring a downstream consumer to re-derive aggregates from per-item content.
+
+The aggregates are the primary grounding for downstream synthesis (Q1 contribution selection, summary-thread weighting). A synthesizer reading only the Summary and Aggregates sections of the four artifacts has enough signal to identify the cycle's largest bodies of work without scanning every item.
+
+### Per-source aggregate requirements
+
+**PRs (`source = prs`)** — by top-level directory from `files-touched`. Emit the top 8 directories by PR count. Single-file cross-cutting paths (e.g., `acme/webapp/constants.py`) are included if they make the top 8 but flagged as cross-cutting.
+
+```markdown
+## Aggregates
+
+**By top-level directory** (top 8):
+
+- `<path>`: <N> PRs
+- ...
+```
+
+**Asana (`source = asana`)** — by project membership. Tasks with multiple project memberships count in each project. Emit all projects with `count >= 2`; collapse the long tail (count = 1) into a single "Other" row with the aggregate count. Exclude auto-archive buckets (e.g., `[Static] Archive - <team>`) — they are metadata, not work.
+
+```markdown
+## Aggregates
+
+**By project** (tasks count in every project they belong to; auto-archive buckets excluded):
+
+- <project name>: <N> tasks
+- ...
+- Other (single-task projects): <N> tasks
+```
+
+**Notion (`source = notion`)** — by `Doc Type` property when present, else by parent database name. Emit all values with `count >= 1`.
+
+```markdown
+## Aggregates
+
+**By Doc Type / parent database**:
+
+- <type or db name>: <N> pages
+- ...
+```
+
+**Archive (`source = archive`)** — by archive month (`YYYY-MM`) derived from the archive root path structure. Useful for spotting work-cadence patterns across the window.
+
+```markdown
+## Aggregates
+
+**By archive month**:
+
+- <YYYY-MM>: <N> directories
+- ...
+```
+
+### Aggregates and zero-item artifacts
+
+When the artifact has zero items, the Aggregates section is still emitted with an empty body or a single line stating "No items to aggregate." Consistent shape matters for downstream parsing.
+
+## Error Items
+
+When a per-item fetch fails (e.g., a specific Notion page returns 404 mid-batch), emit an entry with the identifier known so far and an `[ERROR: <message>]` marker in place of the body. Continue with remaining items. Do not abort the full artifact on a single-item failure.
+
+```markdown
+### <identifier> — <title or "(title unavailable)">
+
+[ERROR: <error message verbatim>]
+
+---
+```
+
+Error items count toward `K` in the Summary, not toward `N` as ordinary items.
+
+## Ordering
+
+Default ordering within Items is reverse chronological by the most relevant timestamp for the source:
+
+- PRs — by `merged_at` (falling back to `closed_at`, then `created_at`)
+- Asana — by `completed_at` (falling back to `modified_at`)
+- Notion — by `last_edited_at`
+- Archive — by most recent file mtime in the directory
+
+This puts the most recent work first, which matches how a reader scans for "what shipped lately."
+
+## Edge Cases
+
+- **Zero items**: Emit the header, an empty Items section (no entries), and `Summary: 0 items. 0 sparse. 0 errors.` Do not skip the file — its absence is ambiguous with a fetch failure.
+- **All items sparse**: Emit normally with the sparse marker on each. The Summary `M = N` signal is the orchestrator's cue that downstream synthesis may need to fall back to other sources for substance.
+- **Source-specific metadata missing**: If a field documented above as required is absent from the API response, emit `<field>: —` rather than omitting the line. Consistent shape matters for downstream parsing.
